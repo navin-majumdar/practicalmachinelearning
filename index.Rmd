@@ -6,27 +6,175 @@ output:
   html_document: 
     keep_md: yes
 ---
+# Executive Summary
+In this report we will try to predict the quality of an exercise performed by an athlete. The data used in this report comes from the [Human Activity Recognition project.](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) In this study, several athletes were asked to perform some weight lifting exercises in 5 different ways, only one of which is the correct way of performing the lifting. The project supplied two datasets, a training and testing dataset. Each of these datasets contains several recordable variables that we will use to predict the outcome `classe` which represents the class a given exercise belongs to. The `classe` variable is a factor variable with five levels A,B,C,D,E. These levels are supplied in the training dataset but not in the testing dataset. In this report we will be trying to predict the `classe` for each of the 20 observations provided in the testing dataset.
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r}
+## Import Data
+URL_trng <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+if (!file.exists("pml-training.csv")) {
+  download.file(url = URL_trng, destfile = "pml-training.csv")}
+  
+URL_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists("pml-testing.csv")) {
+  download.file(url = URL_test, destfile = "pml-testing.csv")}
 ```
 
-## R Markdown
+# Exploratory Data Analysis
+## Data Reading and Cleaning
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r}
+training.raw <- read.csv("pml-training.csv", na.strings = c("NA", ""))
+testing.raw <- read.csv("pml-testing.csv", na.strings = c("NA", ""))
+count.raw <- dim(training.raw)
 ```
 
-## Including Plots
+We see that the training dataset contains `r count.raw[1]` observations of `r count.raw[2]` variables. 
+After taking a quick look at the training dataset we noticed a lot of columns with NA or no entries. The next code chunk gets rid of these columns: 
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+training.cleaned01 <- training.raw[, colSums(is.na(training.raw)) == 0]
+testing.cleaned01 <- testing.raw[, colSums(is.na(testing.raw)) == 0]
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Then remove all time related data as we won’t use those:
+```{r}
+removeColumns <- grep("timestamp", names(training.cleaned01))
+training.cleaned02 <- training.cleaned01[,-c(1, removeColumns )]
+testing.cleaned02 <- testing.cleaned01[,-c(1, removeColumns )]
+```
+
+Final Datasets to be explored:
+```{r}
+## convert all factors to integers
+classeLevels <- levels(training.cleaned02$classe)
+training.cleaned03 <- data.frame(data.matrix(training.cleaned02))
+training.cleaned03$classe <- factor(training.cleaned03$classe, labels=classeLevels)
+testing.cleaned03 <- data.frame(data.matrix(testing.cleaned02))
+
+## Final Datasets
+training <- training.cleaned03
+testing <- testing.cleaned03
+count_final <- dim(training)
+```
+
+After this data cleaning our dataset contains `r count_final[2]` variables, down from `r count.raw[2]`. One of these variables `classe` is the outcome we are trying to predict, so the cleaned dataset contains `r count_final[2]-1` predictor variables.
+
+## Splitting Dataset
+The training dataset is then partitioned into two to create a Training set (60% of the data) for the modelling process and a Test set (with the remaining 40%) for the validations. The main testing dataset is not changed and will only be used for the quiz results generation.
+
+```{r}
+set.seed(20180107)
+library(caret, quietly = TRUE, warn.conflicts = FALSE)
+index <- createDataPartition(y = training$classe, p = 0.6, list = FALSE)
+trainingData <- training[index, ]
+testingData <- training[-index, ]
+```
+
+# Modeling - Prediction Model Building
+## Correlated Variables
+Since there are many predictor variables in this dataset, it will be a good idea to see if there are any variables that are strongly correlated. If such variables exist, we would need to exclude these variables from our training, since otherwise we might be overfitting the data.
+
+```{r}
+library(corrplot, quietly = TRUE, warn.conflicts = FALSE)
+## Make a correlation matrix plot
+corMat <- cor(trainingData[,-dim(trainingData)[2]],)
+corrplot(corMat, method = "color", type="lower", order="hclust", tl.cex = 0.75, tl.col="black", tl.srt = 45)
+```
+
+The correlation plot above shows correlations between the variables. In this figure the darker the color, blue or red, the more correlated the two variables are. As one can see, there are several variables that are highly correlated and we would need to exclude them from our fit:
+
+```{r}
+library(caret, quietly = TRUE, warn.conflicts = FALSE)
+## Extract highly, r > 0.5, correlated variables and take them out of the training dataset
+highlyCor <- findCorrelation(corMat, cutoff = 0.5)
+newTrainData <- trainingData[, -highlyCor]
+count_new <- ncol(newTrainData)
+```
+
+As we can see, the final training dataset contains `r count_new` variables, `r count_new-1` predictor variables and one outcome `classe`.
+Next we examine the correlation matrix in the final dataset to confirm that we see no significant correlations between the variables in this final training dataset.:
+
+```{r}
+library(corrplot, quietly = TRUE, warn.conflicts = FALSE)
+cormat <- cor(newTrainData[,-dim(newTrainData)[2]])
+corrplot(cormat, method = "color", type="lower", order="hclust", tl.cex = 0.75, tl.col="black", tl.srt = 45)
+```
+
+Now check the correlations between the predictors and the outcome variable in the new training set.
+
+```{r}
+correlations <- cor(newTrainData[,-dim(newTrainData)[2]], as.numeric(newTrainData$classe))
+bestCorrelations <- subset(as.data.frame(as.table(correlations)), abs(Freq)>0.3)
+bestCorrelations
+```
+
+Even the best correlations with `classe` are hardly above 0.3. We conclude that there doesn’t seem to be any predictors strongly correlated with the outcome variable, so linear regression model may not be a good option. Random forest model may be more robust for this data.
+
+# Training
+We will be using the Random Forests algorithm to perform the training. Originally we used the `bootstrapping` option with the random forest algorithm but that proved to be very time consuming. Without any loss of accuracy and reduce computation time, we use the cross validation method and parallel processing [(reference)](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md).
+
+```{r}
+library(parallel, quietly = TRUE, warn.conflicts = FALSE)
+library(doParallel, quietly = TRUE, warn.conflicts = FALSE)
+## Configure parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+## Training the Model using 5 Fold cross-validation
+model_control <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+
+## Develop training model using Random Forest
+model <- train(classe~., data = newTrainData, method= "rf", trControl = model_control, importance = T)
+
+## De-register parallel processing cluster
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+## Predictor Importance
+In any model fitting, as predictors would have different significances in the model; we explore that with the Variable Importance Plot:
+
+```{r}
+library(randomForest, quietly = TRUE, warn.conflicts = FALSE)
+
+varImpPlot(model$finalModel, main = "Importance of Predictors in the Fit", pch=19, col="blue",cex=0.75, sort=TRUE, type=1)
+```
+
+The figure above shows the importance of variables in the fit: variables with higher x-axis values are more important than those with lower x-axis values.
+
+# Prediction
+First we will make predictions on training dataset and then on testing dataset. This will produce error rates.
+
+```{r}
+## Prediction using Training Data
+model
+model$resample
+confusionMatrix.train(model)
+
+predict_trng <- predict(model, newTrainData)
+conf_trng <- confusionMatrix(predict_trng, newTrainData$classe)
+## Accuracy in Training data
+accuracy_trng <- conf_trng$overall[1]
+## In Sample Error Rate
+err_trng <- 1-accuracy_trng
+
+## Prediction using Validation Data
+predict_testingData <- predict(model, testingData)
+conf_testingdata <- confusionMatrix(predict_testingData, testingData$classe)
+## Accuracy in Training data
+accuracy_test <- (conf_testingdata$overall[1])*100
+## Out of Sample Error Rate
+err_test <- 100-accuracy_test
+```
+
+Our model has an accuracy of `r accuracy_test`% at par with the [reference](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-requiredModelAccuracy.md). The Out of Sample Error Rate is `r err_test`%.
+
+## Prediction on Testing Set
+We now use random forests to predict the outcome variable `classe` for the testing set.
+
+```{r}
+predict(model, testing)
+```
+
+This completes the course project.
